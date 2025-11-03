@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>トークン発行</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
+    .card { background: white; padding: 20px; border-radius: 10px; max-width: 400px; margin: auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    input, button { padding: 10px; margin: 5px 0; width: 100%; border: 1px solid #ccc; border-radius: 5px; }
+    button { background: #4CAF50; color: white; font-weight: bold; cursor: pointer; }
+    .result { margin-top: 15px; padding: 15px; background: #e8f5e9; border-radius: 5px; font-family: monospace; }
+    code { background: #ddd; padding: 5px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>MilkChoco Hack トークン発行</h2>
+    <form id="form">
+      <input placeholder="ユーザー名（例: hacker1）" name="user" required>
+      <input type="number" placeholder="有効期限（日）" name="days" value="30" min="1">
+      <input type="number" placeholder="使用回数" name="uses" value="10" min="1">
+      <button type="submit">トークン発行</button>
+    </form>
+    <div id="result"></div>
+  </div>
+
+  <script>
+    document.getElementById('form').onsubmit = async (e) => {
+      e.preventDefault();
+      const form = new FormData(e.target);
+      const data = {
+        user: form.get('user'),
+        expires_days: form.get('days'),
+        uses: form.get('uses')
+      };
+
+      const res = await fetch('/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+
+      const json = await res.json();
+      const result = document.getElementById('result');
+      if (json.success) {
+        result.innerHTML = `
+          <b>発行成功！</b><br>
+          トークン: <code>${json.token}</code><br>
+          ユーザー: ${json.user}<br>
+          期限: ${json.expires}<br>
+          回数: ${json.uses}回
+        `;
+      } else {
+        result.innerHTML = '<span style="color:red;">発行失敗</span>';
+      }
+    };
+  </script>
+</body>
+</html>

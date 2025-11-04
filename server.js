@@ -1,4 +1,4 @@
-// server.js - 修正済み（Cannot POST / 解決）
+// server.js - タイポ修正版（APIエラー解決）
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
@@ -46,16 +46,16 @@ function getLoginHTML(error = '') {
 </html>`;
 }
 
-// === 認証ミドルウェア（修正！）===
+// === 認証ミドルウェア ===
 function requireAuth(req, res, next) {
   const password = req.body.password || req.query.password;
   if (password === ADMIN_PASSWORD) {
-    return next(); // 認証OK → 次のルートへ
+    return next();
   }
   res.send(getLoginHTML('パスワードが間違っています'));
 }
 
-// === ルート定義（重要：順序！）===
+// === ルート定義 ===
 
 // 1. ログイン画面（GET /）
 app.get('/', (req, res) => {
@@ -64,7 +64,7 @@ app.get('/', (req, res) => {
 
 // 2. ログイン処理（POST /login）
 app.post('/login', requireAuth, (req, res) => {
-  res.redirect('/dashboard'); // 認証後 → 管理画面
+  res.redirect('/dashboard');
 });
 
 // 3. 管理画面（/dashboard）
@@ -103,11 +103,11 @@ app.get('/delete', (req, res) => {
   res.redirect('/dashboard');
 });
 
-// 6. API（公開）
+// 6. API（公開） - タイポ修正！
 app.get('/api/check', (req, res) => {
   const token = req.query.token;
   const data = tokens[token];
-  if (!data || new Date(d.expires) < new Date() || data.used >= data.uses) {
+  if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
     return res.json({ valid: false, msg: '無効なToken' });
   }
   data.used++;

@@ -1,145 +1,59 @@
 const express = require('express');
 const app = express();
+const port = process.env.PORT || 3000;
 
-app.use(express.json());  // JSONパースは最初に
+app.use(express.urlencoded({ extended: true }));
 
-let tokens = []; // メモリDB
+let tokens = {};  // メモリに保存（無料プラン）
 
-function generateToken() {
-  return 'FREE-' + Math.random().toString(36).substr(2, 10).toUpperCase();
-}
-
-// === 動的ルートを先に定義（重要！） ===
-app.post('/generate', (req, res) => {
-  const { user = "anonymous", expires_days = 30, uses = 10 } = req.body;
-  const token = generateToken();
-  const record = {
-    token,
-    user,
-    expires: Date.now() + (expires_days * 24 * 60 * 60 * 1000),
-    uses: parseInt(uses),
-    created: new Date().toISOString()
-  };
-  tokens.push(record);
-  console.log('発行:', token);
-  res.json({
-    success: true,
-    token,
-    user,
-    expires: new Date(record.expires).toISOString().split('T')[0],
-    uses
-  });
+// API: Token認証
+app.get('/api/check', (req, res) => {
+  const token = req.query.token;
+  const data = tokens[token];
+  if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
+    return res.json({ valid: false, msg: '無効なToken' });
+  }
+  data.used++;
+  res.json({ valid: true });
 });
 
-app.post('/validate', (req, res) => {
-  const { token } = req.body;
-  console.log('検証:', token);
-  const record = tokens.find(t => t.token === token);
-  if (!record) {
-    return res.json({ valid: false, message: "無効なトークンです" });
+// 管理画面 + 発行フォーム + 無効化リンク
+app.get('/', (req, res) => {
+  let html = `<h1>MilkChoco Token Manager</h1><ul>`;
+  for (const [t, d] of Object.entries(tokens)) {
+    const remaining = d.uses - d.used;
+    const expired = new Date(d.expires) < new Date();
+    const status = expired ? '期限切れ' : `残り: ${remaining}回`;
+    const style = expired ? 'color:#ff6b6b; font-weight:bold;' : '';
+    html += `<li style="${style}"><b>${t}</b> - ${d.user} - ${status} - 期限: ${d.expires} 
+      <a href="/delete?token=${encodeURIComponent(t)}" style="color:red;">[無効化]</a></li>`;
   }
-  if (record.expires < Date.now()) {
-    return res.json({ valid: false, message: "期限切れです" });
-  }
-  if (record.uses <= 0) {
-    return res.json({ valid: false, message: "回数超過です" });
-  }
-  record.uses--;
-  res.json({
-    valid: true,
-    user: record.user,
-    expires: new Date(record.expires).toISOString().split('T')[0],
-    uses_left: record.uses
-  });
-});
-
-app.get('/tokens', (req, res) => {
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>トークン管理</title>
-      <style>
-        body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
-        .card { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #f4f4f4; }
-        .token { font-family: monospace; background: #ddd; padding: 2px 6px; }
-        button { padding: 5px 10px; background: #e74c3c; color: white; border: none; border-radius: 3px; cursor: pointer; }
-        button:hover { background: #c0392b; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        .expired { color: #ff6b6b; font-weight: bold; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h2>トークン管理画面</h2>
-        <p><a href="/">← 発行ページに戻る</a></p>
-        <table>
-          <tr><th>トークン</th><th>ユーザー</th><th>期限</th><th>残り回数</th><th>作成日</th><th>操作</th></tr>
-          ${tokens.map(t => {
-            const expired = t.expires < Date.now();
-            return `
-              <tr ${expired ? 'class="expired"' : ''}>
-                <td><span class="token">${t.token}</span></td>
-                <td>${t.user}</td>
-                <td>${new Date(t.expires).toISOString().split('T')[0]}</td>
-                <td>${expired ? '期限切れ' : t.uses}</td>
-                <td>${t.created.split('T')[0]}</td>
-                <td>
-                  <button onclick="invalidate('${t.token}')" ${expired ? 'disabled' : ''}>
-                    無効化
-                  </button>
-                </td>
-              </tr>
-            `;
-          }).join('')}
-        </table>
-        <p>総トークン数: ${tokens.length}</p>
-      </div>
-
-      <script>
-        async function invalidate(token) {
-          if (!confirm('このトークンを無効化しますか？')) return;
-          const res = await fetch('/invalidate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token })
-          });
-          const data = await res.json();
-          if (data.success) {
-            location.reload();
-          } else {
-            alert('無効化失敗: ' + data.message);
-          }
-        }
-      </script>
-    </body>
-    </html>
-  `;
+  html += `</ul><hr>
+    <form action="/add" method="POST">
+      Token: <input name="token" value="FREE-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly style="width:300px;"><br><br>
+      ユーザー: <input name="user" placeholder="例: hacker1" required><br><br>
+      期限: <input name="expires" type="date" required><br><br>
+      回数: <input name="uses" type="number" value="10" min="1" required><br><br>
+      <button style="padding:10px 20px; font-size:16px;">トークン発行</button>
+    </form>`;
   res.send(html);
 });
 
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
-});
-
-app.post('/invalidate', (req, res) => {
-  const { token } = req.body;
-  const index = tokens.findIndex(t => t.token === token);
-  if (index === -1) {
-    return res.json({ success: false, message: 'トークンが見つかりません' });
+app.post('/add', (req, res) => {
+  const { token, user, expires, uses } = req.body;
+  if (!token || !user || !expires || !uses) {
+    return res.send('入力漏れがあります');
   }
-  tokens[index].uses = 0; // 回数を0に → 即無効化
-  console.log('無効化:', token);
-  res.json({ success: true, message: '無効化完了' });
+  tokens[token] = { user, expires, uses: parseInt(uses), used: 0 };
+  res.redirect('/');
 });
 
-// === static を最後に（これが重要！） ===
-app.use(express.static('public'));
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server on port ${port}`);
+app.get('/delete', (req, res) => {
+  const token = req.query.token;
+  if (token && tokens[token]) {
+    delete tokens[token];
+  }
+  res.redirect('/');
 });
+
+app.listen(port, () => console.log('Server running on port', port));

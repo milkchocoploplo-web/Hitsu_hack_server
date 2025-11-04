@@ -1,13 +1,13 @@
-// server.js - 環境変数で安全にパスワード保護
+// server.js - 修正済み（Cannot POST / 解決）
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// === 環境変数からパスワード取得（Render.comで設定）===
+// === 環境変数 ===
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 if (!ADMIN_PASSWORD) {
-  console.error("ADMIN_PASSWORDが未設定です！Render.comで設定してください");
+  console.error("ADMIN_PASSWORDが未設定！Render.comで設定してください");
   process.exit(1);
 }
 
@@ -15,22 +15,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 let tokens = {};
-
-// === 認証ミドルウェア ===
-function requireAuth(req, res, next) {
-  const password = req.body.password || req.query.password;
-  const auth = req.headers['authorization'];
-
-  if (password === ADMIN_PASSWORD || auth === `Bearer ${ADMIN_PASSWORD}`) {
-    return next();
-  }
-
-  if (req.path === '/' || req.path === '/login') {
-    return res.send(getLoginHTML());
-  }
-
-  res.status(401).send(getLoginHTML('パスワードが間違っています'));
-}
 
 // === ログイン画面 ===
 function getLoginHTML(error = '') {
@@ -52,7 +36,7 @@ function getLoginHTML(error = '') {
 <body>
   <div class="card">
     <h2>MilkChoco 管理画面</h2>
-    <form method="POST" action="/">
+    <form method="POST" action="/login">
       <input type="password" name="password" placeholder="パスワード" required autofocus><br>
       <button type="submit">ログイン</button>
     </form>
@@ -62,14 +46,29 @@ function getLoginHTML(error = '') {
 </html>`;
 }
 
-// === ルート保護（APIは公開）===
-app.all('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
-  return requireAuth(req, res, next);
+// === 認証ミドルウェア（修正！）===
+function requireAuth(req, res, next) {
+  const password = req.body.password || req.query.password;
+  if (password === ADMIN_PASSWORD) {
+    return next(); // 認証OK → 次のルートへ
+  }
+  res.send(getLoginHTML('パスワードが間違っています'));
+}
+
+// === ルート定義（重要：順序！）===
+
+// 1. ログイン画面（GET /）
+app.get('/', (req, res) => {
+  res.send(getLoginHTML());
 });
 
-// === 管理画面 ===
-app.get('/', (req, res) => {
+// 2. ログイン処理（POST /login）
+app.post('/login', requireAuth, (req, res) => {
+  res.redirect('/dashboard'); // 認証後 → 管理画面
+});
+
+// 3. 管理画面（/dashboard）
+app.get('/dashboard', (req, res) => {
   let html = `<h1>Token Manager</h1><ul>`;
   for (const [t, d] of Object.entries(tokens)) {
     const remaining = d.uses - d.used;
@@ -85,30 +84,30 @@ app.get('/', (req, res) => {
       回数: <input name="uses" type="number" value="10" min="1" required><br><br>
       <button>発行</button>
     </form>
-    <p><a href="/logout">ログアウト</a></p>`;
+    <p><a href="/">ログアウト</a></p>`;
   res.send(html);
 });
 
+// 4. トークン発行
 app.post('/add', (req, res) => {
   const { token, user, expires, uses } = req.body;
   if (!token || !user || !expires || !uses) return res.send('入力漏れ');
   tokens[token] = { user, expires, uses: parseInt(uses), used: 0 };
-  res.redirect('/');
+  res.redirect('/dashboard');
 });
 
+// 5. 無効化
 app.get('/delete', (req, res) => {
   const token = req.query.token;
   if (token && tokens[token]) delete tokens[token];
-  res.redirect('/');
+  res.redirect('/dashboard');
 });
 
-app.get('/logout', (req, res) => res.send(getLoginHTML()));
-
-// === API（公開）===
+// 6. API（公開）
 app.get('/api/check', (req, res) => {
   const token = req.query.token;
   const data = tokens[token];
-  if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
+  if (!data || new Date(d.expires) < new Date() || data.used >= data.uses) {
     return res.json({ valid: false, msg: '無効なToken' });
   }
   data.used++;
@@ -117,5 +116,5 @@ app.get('/api/check', (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server on port ${port}`);
-  console.log(`管理画面: https://token-milkchocoexe-ribon.onrender.com`);
+  console.log(`ログイン: https://token-milkchocoexe-ribon.onrender.com`);
 });

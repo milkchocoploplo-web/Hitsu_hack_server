@@ -149,7 +149,7 @@ app.get('/api/check', async (req, res) => {
 
   const existing = Object.values(sessionCache).find(s => s.token === token);
   if (existing && existing.session_id !== sessionId) {
-    return res.json({ valid: false, msg: 'Token always using' });
+    return res.json({ valid: false, msg: 'Token already using' });
   }
 
   db.run("INSERT OR REPLACE INTO sessions (token, session_id) VALUES (?, ?)", [token, sessionId]);

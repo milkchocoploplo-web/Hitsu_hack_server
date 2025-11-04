@@ -1,8 +1,7 @@
 const express = require('express');
 const app = express();
 
-app.use(express.json());
-app.use(express.static('public'));
+app.use(express.json());  // JSONパースは最初に
 
 let tokens = []; // メモリDB
 
@@ -10,7 +9,7 @@ function generateToken() {
   return 'FREE-' + Math.random().toString(36).substr(2, 10).toUpperCase();
 }
 
-// === POST /generate ===
+// === 動的ルートを先に定義（重要！） ===
 app.post('/generate', (req, res) => {
   const { user = "anonymous", expires_days = 30, uses = 10 } = req.body;
   const token = generateToken();
@@ -32,7 +31,6 @@ app.post('/generate', (req, res) => {
   });
 });
 
-// === POST /validate ===
 app.post('/validate', (req, res) => {
   const { token } = req.body;
   console.log('検証:', token);
@@ -55,12 +53,6 @@ app.post('/validate', (req, res) => {
   });
 });
 
-// === GET / - 発行ページ ===
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
-});
-
-// === GET /tokens - 管理画面（HTML） ===
 app.get('/tokens', (req, res) => {
   const html = `
     <!DOCTYPE html>
@@ -129,7 +121,10 @@ app.get('/tokens', (req, res) => {
   res.send(html);
 });
 
-// === POST /invalidate - 無効化API ===
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/index.html');
+});
+
 app.post('/invalidate', (req, res) => {
   const { token } = req.body;
   const index = tokens.findIndex(t => t.token === token);
@@ -140,6 +135,9 @@ app.post('/invalidate', (req, res) => {
   console.log('無効化:', token);
   res.json({ success: true, message: '無効化完了' });
 });
+
+// === static を最後に（これが重要！） ===
+app.use(express.static('public'));
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {

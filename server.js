@@ -1,14 +1,14 @@
-// server.js - 完全版（SQLite永続化 + スリープ対策 + HEALTHチェック）
+// server.js - トークン共有防止（Aが閉じるまでB使えない）
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// === 環境変数（Render.comで設定）===
+// === 環境変数 ===
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 if (!ADMIN_PASSWORD) {
-  console.error("ERROR: ADMIN_PASSWORDが未設定！Render.comで設定してください");
+  console.error("ERROR: ADMIN_PASSWORDが未設定！");
   process.exit(1);
 }
 
@@ -16,12 +16,9 @@ if (!ADMIN_PASSWORD) {
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// === SQLite DB（永続化）===
+// === SQLite DB ===
 const dbPath = path.join(__dirname, 'tokens.db');
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) console.error("DB接続失敗:", err);
-  else console.log(`DB接続: ${dbPath}`);
-});
+const db = new sqlite3.Database(dbPath);
 
 // テーブル作成
 db.serialize(() => {
@@ -36,62 +33,48 @@ db.serialize(() => {
       created DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token TEXT NOT NULL,
+      session_id TEXT UNIQUE NOT NULL
+    )
+  `);
 });
 
-// === メモリキャッシュ（高速化）===
+// === キャッシュ ===
 let tokenCache = {};
+let sessionCache = {};
 
-// キャッシュ更新関数
 async function updateCache() {
   return new Promise((resolve) => {
     db.all("SELECT * FROM tokens", (err, rows) => {
-      if (err) {
-        console.error("キャッシュ更新失敗:", err);
-        return resolve();
-      }
       tokenCache = {};
       rows.forEach(row => tokenCache[row.token] = row);
-      resolve();
     });
+    db.all("SELECT * FROM sessions", (err, rows) => {
+      sessionCache = {};
+      rows.forEach(row => sessionCache[row.session_id] = row);
+    });
+    resolve();
   });
 }
 
-// 起動時にキャッシュロード
-updateCache().then(() => {
-  console.log(`キャッシュロード: ${Object.keys(tokenCache).length}トークン`);
-});
+updateCache();
 
-// === ログイン画面HTML ===
+// === ログイン画面 ===
 function getLoginHTML(error = '') {
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>管理画面ログイン</title>
-  <style>
-    body {font-family: sans-serif; background: #f0f0f0; padding: 50px; text-align: center;}
-    .card {background: white; padding: 30px; border-radius: 15px; display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.1);}
-    input, button {padding: 12px; margin: 10px; width: 280px; border: 1px solid #ddd; border-radius: 8px;}
-    button {background: #4CAF50; color: white; font-weight: bold; cursor: pointer;}
-    button:hover {background: #45a049;}
-    .error {color: red; font-weight: bold;}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>MilkChoco 管理画面</h2>
-    <form method="POST" action="/login">
-      <input type="password" name="password" placeholder="パスワード" required autofocus><br>
-      <button type="submit">ログイン</button>
-    </form>
-    ${error ? `<p class="error">${error}</p>` : ''}
-  </div>
-</body>
-</html>`;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>管理画面</title>
+  <style>body{font-family:sans-serif;background:#f0f0f0;padding:50px;text-align:center;}
+  .card{background:white;padding:30px;border-radius:15px;display:inline-block;box-shadow:0 4px 15px rgba(0,0,0,0.1);}
+  input,button{padding:12px;margin:10px;width:280px;border:1px solid #ddd;border-radius:8px;}
+  button{background:#4CAF50;color:white;font-weight:bold;cursor:pointer;}
+  .error{color:red;font-weight:bold;}</style></head><body>
+  <div class="card"><h2>MilkChoco 管理画面</h2>
+  <form method="POST" action="/login"><input type="password" name="password" placeholder="パスワード" required><br>
+  <button type="submit">ログイン</button></form>${error ? `<p class="error">${error}</p>` : ''}</div></body></html>`;
 }
 
-// === 認証ミドルウェア ===
 function requireAuth(req, res, next) {
   const password = req.body.password || req.query.password;
   if (password === ADMIN_PASSWORD) return next();
@@ -99,21 +82,18 @@ function requireAuth(req, res, next) {
 }
 
 // === ルート ===
-
-// 1. ログイン画面
 app.get('/', (req, res) => res.send(getLoginHTML()));
-
-// 2. ログイン処理
 app.post('/login', requireAuth, (req, res) => res.redirect('/dashboard'));
 
-// 3. 管理画面
 app.get('/dashboard', async (req, res) => {
   await updateCache();
   let html = `<h1>Token Manager</h1><ul>`;
   for (const [t, d] of Object.entries(tokenCache)) {
     const remaining = d.uses - d.used;
     const expired = new Date(d.expires) < new Date();
-    html += `<li><b>${t}</b> - ${d.user} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} - ${d.expires} 
+    const active = Object.values(sessionCache).find(s => s.token === t);
+    html += `<li><b>${t}</b> - ${d.user} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} 
+      - 使用中: ${active ? 'はい' : 'いいえ'}
       <a href="/delete?token=${t}" style="color:red;" onclick="return confirm('無効化？');">[無効化]</a></li>`;
   }
   html += `</ul><hr>
@@ -128,60 +108,64 @@ app.get('/dashboard', async (req, res) => {
   res.send(html);
 });
 
-// 4. トークン発行
 app.post('/add', (req, res) => {
   const { token, user, expires, uses } = req.body;
-  if (!token || !user || !expires || !uses) return res.send('入力漏れ');
-
-  db.run(
-    "INSERT OR REPLACE INTO tokens (token, user, expires, uses, used) VALUES (?, ?, ?, ?, 0)",
-    [token, user, expires, parseInt(uses)],
-    async (err) => {
-      if (err) return res.send('発行失敗: ' + err.message);
+  db.run("INSERT OR REPLACE INTO tokens (token, user, expires, uses, used) VALUES (?, ?, ?, ?, 0)",
+    [token, user, expires, parseInt(uses)], async () => {
       await updateCache();
       res.redirect('/dashboard');
-    }
-  );
+    });
 });
 
-// 5. 無効化
 app.get('/delete', async (req, res) => {
   const token = req.query.token;
-  if (!token) return res.redirect('/dashboard');
-
-  db.run("DELETE FROM tokens WHERE token = ?", [token], async (err) => {
-    if (err) console.error("削除失敗:", err);
-    await updateCache();
-    res.redirect('/dashboard');
-  });
+  if (token) {
+    db.run("DELETE FROM tokens WHERE token = ?", [token]);
+    db.run("DELETE FROM sessions WHERE token = ?", [token]);
+  }
+  await updateCache();
+  res.redirect('/dashboard');
 });
 
-// 6. API（公開）+ HEALTHチェック
+// === API：認証 + 共有防止 ===
 app.get('/api/check', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   const token = req.query.token;
+  const sessionId = req.query.sessionId;
 
-  // === スリープ対策：HEALTHチェック ===
+  if (!token || !sessionId) return res.json({ valid: false, msg: 'Invalid request' });
+
   if (token === 'HEALTH') {
-    return res.json({ valid: false, msg: 'Server is alive' });
+    res.setHeader('Content-Length', '10');
+    return res.end('{"ok":true}');
   }
 
-  // === 通常認証 ===
+  await updateCache();
   const data = tokenCache[token];
+
   if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
     return res.json({ valid: false, msg: '無効なToken' });
   }
 
+  const existing = Object.values(sessionCache).find(s => s.token === token);
+  if (existing && existing.session_id !== sessionId) {
+    return res.json({ valid: false, msg: 'Token always using' });
+  }
+
+  db.run("INSERT OR REPLACE INTO sessions (token, session_id) VALUES (?, ?)", [token, sessionId]);
   data.used++;
-  db.run("UPDATE tokens SET used = ? WHERE token = ?", [data.used, token], (err) => {
-    if (err) console.error("使用回数更新失敗:", err);
-  });
+  db.run("UPDATE tokens SET used = ? WHERE token = ?", [data.used, token]);
 
-  res.json({ valid: true });
+  res.json({ valid: true, sessionId });
 });
 
-// === サーバー起動 ===
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-  console.log(`ログイン: https://token-milkchocoexe-ribon.onrender.com`);
-  console.log(`Cron Job設定推奨: curl -X GET /api/check?token=HEALTH`);
+// === ログアウトAPI ===
+app.post('/api/logout', (req, res) => {
+  const { token, sessionId } = req.body;
+  if (token && sessionId) {
+    db.run("DELETE FROM sessions WHERE token = ? AND session_id = ?", [token, sessionId]);
+  }
+  res.json({ success: true });
 });
+
+app.listen(port, () => console.log(`Server on port ${port}`));

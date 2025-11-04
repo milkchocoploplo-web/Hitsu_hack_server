@@ -1,12 +1,110 @@
+// server.js - 環境変数で安全にパスワード保護
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// === 環境変数からパスワード取得（Render.comで設定）===
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if (!ADMIN_PASSWORD) {
+  console.error("ADMIN_PASSWORDが未設定です！Render.comで設定してください");
+  process.exit(1);
+}
+
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-let tokens = {};  // メモリに保存（無料プラン）
+let tokens = {};
 
-// API: Token認証
+// === 認証ミドルウェア ===
+function requireAuth(req, res, next) {
+  const password = req.body.password || req.query.password;
+  const auth = req.headers['authorization'];
+
+  if (password === ADMIN_PASSWORD || auth === `Bearer ${ADMIN_PASSWORD}`) {
+    return next();
+  }
+
+  if (req.path === '/' || req.path === '/login') {
+    return res.send(getLoginHTML());
+  }
+
+  res.status(401).send(getLoginHTML('パスワードが間違っています'));
+}
+
+// === ログイン画面 ===
+function getLoginHTML(error = '') {
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>管理画面ログイン</title>
+  <style>
+    body {font-family: sans-serif; background: #f0f0f0; padding: 50px; text-align: center;}
+    .card {background: white; padding: 30px; border-radius: 15px; display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.1);}
+    input, button {padding: 12px; margin: 10px; width: 280px; border: 1px solid #ddd; border-radius: 8px;}
+    button {background: #4CAF50; color: white; font-weight: bold; cursor: pointer;}
+    button:hover {background: #45a049;}
+    .error {color: red; font-weight: bold;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>MilkChoco 管理画面</h2>
+    <form method="POST" action="/">
+      <input type="password" name="password" placeholder="パスワード" required autofocus><br>
+      <button type="submit">ログイン</button>
+    </form>
+    ${error ? `<p class="error">${error}</p>` : ''}
+  </div>
+</body>
+</html>`;
+}
+
+// === ルート保護（APIは公開）===
+app.all('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  return requireAuth(req, res, next);
+});
+
+// === 管理画面 ===
+app.get('/', (req, res) => {
+  let html = `<h1>Token Manager</h1><ul>`;
+  for (const [t, d] of Object.entries(tokens)) {
+    const remaining = d.uses - d.used;
+    const expired = new Date(d.expires) < new Date();
+    html += `<li><b>${t}</b> - ${d.user} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} - ${d.expires} 
+      <a href="/delete?token=${t}" style="color:red;" onclick="return confirm('無効化？');">[無効化]</a></li>`;
+  }
+  html += `</ul><hr>
+    <form action="/add" method="POST">
+      Token: <input name="token" value="FREE-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly><br><br>
+      ユーザー: <input name="user" required><br><br>
+      期限: <input name="expires" type="date" required><br><br>
+      回数: <input name="uses" type="number" value="10" min="1" required><br><br>
+      <button>発行</button>
+    </form>
+    <p><a href="/logout">ログアウト</a></p>`;
+  res.send(html);
+});
+
+app.post('/add', (req, res) => {
+  const { token, user, expires, uses } = req.body;
+  if (!token || !user || !expires || !uses) return res.send('入力漏れ');
+  tokens[token] = { user, expires, uses: parseInt(uses), used: 0 };
+  res.redirect('/');
+});
+
+app.get('/delete', (req, res) => {
+  const token = req.query.token;
+  if (token && tokens[token]) delete tokens[token];
+  res.redirect('/');
+});
+
+app.get('/logout', (req, res) => res.send(getLoginHTML()));
+
+// === API（公開）===
 app.get('/api/check', (req, res) => {
   const token = req.query.token;
   const data = tokens[token];
@@ -17,43 +115,7 @@ app.get('/api/check', (req, res) => {
   res.json({ valid: true });
 });
 
-// 管理画面 + 発行フォーム + 無効化リンク
-app.get('/', (req, res) => {
-  let html = `<h1>MilkChoco Token Manager</h1><ul>`;
-  for (const [t, d] of Object.entries(tokens)) {
-    const remaining = d.uses - d.used;
-    const expired = new Date(d.expires) < new Date();
-    const status = expired ? '期限切れ' : `残り: ${remaining}回`;
-    const style = expired ? 'color:#ff6b6b; font-weight:bold;' : '';
-    html += `<li style="${style}"><b>${t}</b> - ${d.user} - ${status} - 期限: ${d.expires} 
-      <a href="/delete?token=${encodeURIComponent(t)}" style="color:red;">[無効化]</a></li>`;
-  }
-  html += `</ul><hr>
-    <form action="/add" method="POST">
-      Token: <input name="token" value="FREE-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly style="width:300px;"><br><br>
-      ユーザー: <input name="user" placeholder="例: hacker1" required><br><br>
-      期限: <input name="expires" type="date" required><br><br>
-      回数: <input name="uses" type="number" value="10" min="1" required><br><br>
-      <button style="padding:10px 20px; font-size:16px;">トークン発行</button>
-    </form>`;
-  res.send(html);
+app.listen(port, () => {
+  console.log(`Server on port ${port}`);
+  console.log(`管理画面: https://token-milkchocoexe-ribon.onrender.com`);
 });
-
-app.post('/add', (req, res) => {
-  const { token, user, expires, uses } = req.body;
-  if (!token || !user || !expires || !uses) {
-    return res.send('入力漏れがあります');
-  }
-  tokens[token] = { user, expires, uses: parseInt(uses), used: 0 };
-  res.redirect('/');
-});
-
-app.get('/delete', (req, res) => {
-  const token = req.query.token;
-  if (token && tokens[token]) {
-    delete tokens[token];
-  }
-  res.redirect('/');
-});
-
-app.listen(port, () => console.log('Server running on port', port));

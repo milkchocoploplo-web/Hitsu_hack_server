@@ -103,5 +103,4 @@ app.get('/api/check', async (req, res) => {
   res.json({valid:true});
 });
 
-app.listen(process.env.PORT || 3000);
 module.exports = app;

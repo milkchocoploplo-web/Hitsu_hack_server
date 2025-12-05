@@ -1,4 +1,3 @@
-// server.js（Vercel完全対応・見た目100%同じ・トークン永遠版）
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
@@ -6,24 +5,21 @@ const fs = require('fs');
 
 const app = express();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
 if (!ADMIN_PASSWORD) {
-  console.error("ADMIN_PASSWORD未設定");
+  console.error("ADMIN_PASSWORDが設定されていません");
   process.exit(1);
 }
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// VercelでもRenderでも動くDBパス（これが最重要）
-const isVercel = !!process.env.VERCEL;
-const dbPath = isVercel ? '/tmp/tokens.db' : path.join(__dirname, 'tokens.db');
-
-// Vercel初回起動時に/tmpフォルダ確保
-if (isVercel && !fs.existsSync('/tmp')) fs.mkdirSync('/tmp', { recursive: true });
+// Vercel用のDBパス（/tmpは書き込み可・再起動後も保持）
+const dbPath = process.env.VERCEL ? '/tmp/tokens.db' : path.join(__dirname, '../tokens.db');
 
 const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) console.error("DBエラー:", err);
-  else console.log(`DB保存先: ${dbPath}`);
+  if (err) console.error(err);
+  else console.log(`DB: ${dbPath}`);
 });
 
 db.serialize(() => {
@@ -40,26 +36,25 @@ db.serialize(() => {
 
 let tokenCache = {};
 async function updateCache() {
-  return new Promise(resolve => {
-    db.all("SELECT * FROM tokens", (err, rows) => {
-      if (!err) {
+  return new Promise(r => {
+    db.all("SELECT * FROM tokens", (e, rows) => {
+      if (!e) {
         tokenCache = {};
-        rows.forEach(r => tokenCache[r.token] = r);
+        rows.forEach(row => tokenCache[row.token] = row);
       }
-      resolve();
+      r();
     });
   });
 }
+}
 updateCache();
 
-function getLoginHTML(e='') {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>管理画面ログイン</title><style>body{font-family:sans-serif;background:#f0f0f0;padding:50px;text-align:center}.card{background:white;padding:30px;border-radius:15px;display:inline-block;box-shadow:0 4px 15px rgba(0,0,0,0.1)}input,button{padding:12px;margin:10px;width:280px;border:1px solid #ddd;border-radius:8px}button{background:#4CAF50;color:white;font-weight:bold;cursor:pointer}.error{color:red;font-weight:bold}</style></head><body><div class="card"><h2>MilkChoco 管理画面</h2><form method="POST" action="/login"><input type="password" name="password" placeholder="パスワード" required autofocus><br><button type="submit">ログイン</button></form>${e?'<p class="error">'+e+'</p>:''}</div></body></html>`;
-}
+const getLoginHTML = (e='') => `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>管理画面ログイン</title><style>body{font-family:sans-serif;background:#f0f0f0;padding:50px;text-align:center}.card{background:white;padding:30px;border-radius:15px;display:inline-block;box-shadow:0 4px 15px rgba(0,0,0,0.1)}input,button{padding:12px;margin:10px;width:280px;border:1px solid #ddd;border-radius:8px}button{background:#4CAF50;color:white;font-weight:bold;cursor:pointer}.error{color:red;font-weight:bold}</style></head><body><div class="card"><h2>MilkChoco 管理画面</h2><form method="POST" action="/login"><input type="password" name="password" placeholder="パスワード" required autofocus><br><button type="submit">ログイン</button></form>${e?'<p class="error">'+e+'</p>:''}</div></body></html>`;
 
-function requireAuth(req, res, next) {
+const requireAuth = (req, res, next) => {
   if ((req.body.password || req.query.password) === ADMIN_PASSWORD) return next();
   res.send(getLoginHTML('パスワードが間違っています'));
-}
+};
 
 app.get('/', (req, res) => res.send(getLoginHTML()));
 app.post('/login', requireAuth, (req, res) => res.redirect('/dashboard'));

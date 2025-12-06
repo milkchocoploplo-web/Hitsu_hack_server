@@ -1,4 +1,4 @@
-// server.js - 完全版（SQLite永続化 + スリープ対策 + HEALTHチェック）
+// server.js - 完全版（SQLite永続化 + スリープ対策 + HEALTHチェック + バージョンチェック）
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
@@ -23,7 +23,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
   else console.log(`DB接続: ${dbPath}`);
 });
 
-// テーブル作成
+// テーブル作成（version列追加）
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS tokens (
@@ -33,7 +33,8 @@ db.serialize(() => {
       expires TEXT NOT NULL,
       uses INTEGER DEFAULT 10,
       used INTEGER DEFAULT 0,
-      created DATETIME DEFAULT CURRENT_TIMESTAMP
+      created DATETIME DEFAULT CURRENT_TIMESTAMP,
+      version TEXT NOT NULL DEFAULT '1.0'
     )
   `);
 });
@@ -106,20 +107,21 @@ app.get('/', (req, res) => res.send(getLoginHTML()));
 // 2. ログイン処理
 app.post('/login', requireAuth, (req, res) => res.redirect('/dashboard'));
 
-// 3. 管理画面
+// 3. 管理画面（バージョン入力追加）
 app.get('/dashboard', async (req, res) => {
   await updateCache();
   let html = `<h1>Token Manager</h1><ul>`;
   for (const [t, d] of Object.entries(tokenCache)) {
     const remaining = d.uses - d.used;
     const expired = new Date(d.expires) < new Date();
-    html += `<li><b>${t}</b> - ${d.user} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} - ${d.expires} 
+    html += `<li><b>${t}</b> - ${d.user} - Ver: ${d.version} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} - ${d.expires} 
       <a href="/delete?token=${t}" style="color:red;" onclick="return confirm('無効化？');">[無効化]</a></li>`;
   }
   html += `</ul><hr>
     <form action="/add" method="POST">
       Token: <input name="token" value="FREE-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly><br><br>
       ユーザー: <input name="user" required><br><br>
+      バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>  <!-- ここで好きなバージョンを入力可能 -->
       期限: <input name="expires" type="date" required><br><br>
       回数: <input name="uses" type="number" value="10" min="1" required><br><br>
       <button>発行</button>
@@ -128,14 +130,14 @@ app.get('/dashboard', async (req, res) => {
   res.send(html);
 });
 
-// 4. トークン発行
+// 4. トークン発行（version追加）
 app.post('/add', (req, res) => {
-  const { token, user, expires, uses } = req.body;
-  if (!token || !user || !expires || !uses) return res.send('入力漏れ');
+  const { token, user, version, expires, uses } = req.body;
+  if (!token || !user || !version || !expires || !uses) return res.send('入力漏れ');
 
   db.run(
-    "INSERT OR REPLACE INTO tokens (token, user, expires, uses, used) VALUES (?, ?, ?, ?, 0)",
-    [token, user, expires, parseInt(uses)],
+    "INSERT OR REPLACE INTO tokens (token, user, version, expires, uses, used) VALUES (?, ?, ?, ?, ?, 0)",
+    [token, user, version, expires, parseInt(uses)],
     async (err) => {
       if (err) return res.send('発行失敗: ' + err.message);
       await updateCache();
@@ -156,19 +158,30 @@ app.get('/delete', async (req, res) => {
   });
 });
 
-// 6. API（公開）+ HEALTHチェック
+// 6. API（公開）+ HEALTHチェック + バージョンチェック
 app.get('/api/check', async (req, res) => {
   const token = req.query.token;
+  const version = req.query.version;  // 新規: versionパラメータ
 
   // === スリープ対策：HEALTHチェック ===
   if (token === 'HEALTH') {
     return res.json({ valid: false, msg: 'Server is alive' });
   }
 
+  // === バージョンチェック（必須） ===
+  if (!version) {
+    return res.json({ valid: false, msg: 'バージョン指定が必要です（古いEXE？）' });
+  }
+
   // === 通常認証 ===
   const data = tokenCache[token];
   if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
     return res.json({ valid: false, msg: '無効なToken' });
+  }
+
+  // === バージョン一致チェック ===
+  if (data.version !== version) {
+    return res.json({ valid: false, msg: 'バージョンが一致しません' });
   }
 
   data.used++;

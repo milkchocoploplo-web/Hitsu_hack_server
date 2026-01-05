@@ -34,14 +34,21 @@ db.serialize(() => {
       uses INTEGER DEFAULT 10,
       used INTEGER DEFAULT 0,
       created DATETIME DEFAULT CURRENT_TIMESTAMP,
-      version TEXT NOT NULL DEFAULT '1.0'
+      version TEXT NOT NULL DEFAULT '1.0',
+      CREATE TABLE IF NOT EXISTS player_logs (
+    fc INTEGER PRIMARY KEY,
+    current_name TEXT NOT NULL,
+    previous_names TEXT DEFAULT '[]',  -- JSON array
+    change_history TEXT DEFAULT '[]',  -- JSON array of {old, new, timestamp}
+    is_blacklist BOOLEAN DEFAULT 0,
+    blacklist_name TEXT DEFAULT ''
     )
   `);
 });
 
 // === メモリキャッシュ（高速化）===
 let tokenCache = {};
-
+let playerLogCache = {};
 // キャッシュ更新関数
 async function updateCache() {
   return new Promise((resolve) => {
@@ -54,6 +61,13 @@ async function updateCache() {
       rows.forEach(row => tokenCache[row.token] = row);
       resolve();
     });
+db.all("SELECT * FROM player_logs", (err, rows) => {
+  if (err) return;
+  playerLogCache = {};
+  rows.forEach(row => {
+    playerLogCache[row.fc] = row;
+  });
+});
   });
 }
 
@@ -128,6 +142,27 @@ app.get('/dashboard', async (req, res) => {
     </form>
     <p><a href="/">ログアウト</a></p>`;
   res.send(html);
+  html += `<hr><h2>プレイヤーログ</h2>`;
+const sortedLogs = Object.values(playerLogCache).sort((a, b) => a.fc - b.fc);
+const blacklisted = sortedLogs.filter(l => l.is_blacklist);
+const others = sortedLogs.filter(l => !l.is_blacklist);
+blacklisted.forEach(l => {
+  html += `<p>(${l.fc}, ${l.blacklist_name}): (${l.current_name})</p>`;
+});
+others.forEach(l => {
+  html += `<p>${l.fc}: ${l.current_name}</p>`;
+});
+html += `<a href="/download-log"><button>ログダウンロード</button></a>
+  <form action="/upload-log" method="POST" enctype="multipart/form-data">
+    <input type="file" name="logfile" accept=".txt" required>
+    <button>ログアップロード</button>
+  </form>
+  <hr><h2>ブラックリスト追加</h2>
+  <form action="/add-blacklist" method="POST">
+    FC: <input name="fc" type="number" required><br>
+    名前: <input name="blacklist_name" required><br>
+    <button>追加</button>
+  </form>`;
 });
 
 // 4. トークン発行（version追加）
@@ -162,7 +197,40 @@ app.get('/delete', async (req, res) => {
 app.get('/api/check', async (req, res) => {
   const token = req.query.token;
   const version = req.query.version;  // 新規: versionパラメータ
+// app.get('/api/check'後
+app.post('/api/log-players', async (req, res) => {
+  const token = req.query.token;
+  const { players } = req.body; // [{fc, name}, ...]
+  if (!tokenCache[token] || !players) return res.json({ ok: false });
 
+  for (const p of players) {
+    const fc = parseInt(p.fc);
+    const name = p.name;
+    if (isNaN(fc) || !name) continue;
+
+    const existing = playerLogCache[fc];
+    if (existing) {
+      if (existing.current_name === name) continue; // 一致: 無視
+      // 名前変更: 更新
+      const prevNames = JSON.parse(existing.previous_names);
+      if (!prevNames.includes(existing.current_name)) prevNames.push(existing.current_name);
+      const history = JSON.parse(existing.change_history);
+      history.push({ old: existing.current_name, new: name, timestamp: new Date().toISOString() });
+
+      db.run("UPDATE player_logs SET current_name = ?, previous_names = ?, change_history = ? WHERE fc = ?",
+        [name, JSON.stringify(prevNames), JSON.stringify(history), fc]);
+      playerLogCache[fc].current_name = name;
+      playerLogCache[fc].previous_names = JSON.stringify(prevNames);
+      playerLogCache[fc].change_history = JSON.stringify(history);
+    } else {
+      // 新規
+      db.run("INSERT INTO player_logs (fc, current_name) VALUES (?, ?)", [fc, name]);
+      playerLogCache[fc] = { fc, current_name: name, previous_names: '[]', change_history: '[]', is_blacklist: 0, blacklist_name: '' };
+    }
+  }
+  await updateCache(); // キャッシュ更新
+  res.json({ ok: true });
+});
   // === スリープ対策：HEALTHチェック ===
   if (token === 'HEALTH') {
     return res.json({ valid: false, msg: 'Server is alive' });
@@ -191,7 +259,98 @@ app.get('/api/check', async (req, res) => {
 
   res.json({ valid: true });
 });
+app.post('/add-blacklist', (req, res) => {
+  const { fc, blacklist_name } = req.body;
+  const fcNum = parseInt(fc);
+  if (isNaN(fcNum) || !blacklist_name) return res.redirect('/dashboard');
 
+  if (playerLogCache[fcNum]) {
+    db.run("UPDATE player_logs SET is_blacklist = 1, blacklist_name = ? WHERE fc = ?", [blacklist_name, fcNum]);
+    playerLogCache[fcNum].is_blacklist = 1;
+    playerLogCache[fcNum].blacklist_name = blacklist_name;
+  } else {
+    db.run("INSERT INTO player_logs (fc, current_name, is_blacklist, blacklist_name) VALUES (?, '', 1, ?)", [fcNum, blacklist_name]);
+    playerLogCache[fcNum] = { fc: fcNum, current_name: '', previous_names: '[]', change_history: '[]', is_blacklist: 1, blacklist_name };
+  }
+  res.redirect('/dashboard');
+});
+app.get('/download-log', (req, res) => {
+  let logText = 'プレイヤーログ\n';
+  const sortedLogs = Object.values(playerLogCache).sort((a, b) => a.fc - b.fc);
+  const blacklisted = sortedLogs.filter(l => l.is_blacklist);
+  const others = sortedLogs.filter(l => !l.is_blacklist);
+  blacklisted.forEach(l => logText += `(${l.fc}, ${l.blacklist_name}): (${l.current_name})\n`);
+  others.forEach(l => logText += `${l.fc}: ${l.current_name}\n`);
+
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', 'attachment; filename=player_log.txt');
+  res.send(logText);
+});
+const multer = require('multer'); // 追加依存: npm i multer
+const upload = multer({ dest: 'uploads/' });
+app.post('/upload-log', upload.single('logfile'), (req, res) => {
+  const fs = require('fs');
+  const filePath = req.file.path;
+  const logContent = fs.readFileSync(filePath, 'utf8');
+  fs.unlinkSync(filePath); // クリーン
+
+  const lines = logContent.split('\n');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let fc, name;
+    if (line.startsWith('(')) { // ブラックリスト形式
+      const match = line.match(/\(([\d]+), (.*?)\): \((.*?)\)/);
+      if (match) {
+        fc = parseInt(match[1]);
+        const blName = match[2];
+        name = match[3];
+        // 更新処理（ブラックリストフラグON）
+        if (playerLogCache[fc]) {
+          const existing = playerLogCache[fc];
+          if (existing.current_name !== name) {
+            const prevNames = JSON.parse(existing.previous_names);
+            if (!prevNames.includes(existing.current_name)) prevNames.push(existing.current_name);
+            const history = JSON.parse(existing.change_history);
+            history.push({ old: existing.current_name, new: name, timestamp: new Date().toISOString() });
+            db.run("UPDATE player_logs SET current_name = ?, previous_names = ?, change_history = ?, is_blacklist = 1, blacklist_name = ? WHERE fc = ?",
+              [name, JSON.stringify(prevNames), JSON.stringify(history), blName, fc]);
+            Object.assign(existing, { current_name: name, previous_names: JSON.stringify(prevNames), change_history: JSON.stringify(history), is_blacklist: 1, blacklist_name: blName });
+          } else {
+            db.run("UPDATE player_logs SET is_blacklist = 1, blacklist_name = ? WHERE fc = ?", [blName, fc]);
+            existing.is_blacklist = 1;
+            existing.blacklist_name = blName;
+          }
+        } else {
+          db.run("INSERT INTO player_logs (fc, current_name, is_blacklist, blacklist_name) VALUES (?, ?, 1, ?)", [fc, name, blName]);
+          playerLogCache[fc] = { fc, current_name: name, previous_names: '[]', change_history: '[]', is_blacklist: 1, blacklist_name: blName };
+        }
+      }
+    } else { // 通常形式 fc: name
+      const match = line.match(/^(\d+): (.*)$/);
+      if (match) {
+        fc = parseInt(match[1]);
+        name = match[2];
+        // 更新処理（上書き、マージ）
+        if (playerLogCache[fc]) {
+          const existing = playerLogCache[fc];
+          if (existing.current_name !== name) {
+            const prevNames = JSON.parse(existing.previous_names);
+            if (!prevNames.includes(existing.current_name)) prevNames.push(existing.current_name);
+            const history = JSON.parse(existing.change_history);
+            history.push({ old: existing.current_name, new: name, timestamp: new Date().toISOString() });
+            db.run("UPDATE player_logs SET current_name = ?, previous_names = ?, change_history = ? WHERE fc = ?",
+              [name, JSON.stringify(prevNames), JSON.stringify(history), fc]);
+            Object.assign(existing, { current_name: name, previous_names: JSON.stringify(prevNames), change_history: JSON.stringify(history) });
+          }
+        } else {
+          db.run("INSERT INTO player_logs (fc, current_name) VALUES (?, ?)", [fc, name]);
+          playerLogCache[fc] = { fc, current_name: name, previous_names: '[]', change_history: '[]', is_blacklist: 0, blacklist_name: '' };
+        }
+      }
+    }
+  }
+  res.redirect('/dashboard');
+});
 // === サーバー起動 ===
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);

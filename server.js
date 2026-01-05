@@ -25,6 +25,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 // テーブル作成（version列追加）
 db.serialize(() => {
+  // 1. tokensテーブル
   db.run(`
     CREATE TABLE IF NOT EXISTS tokens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,16 +35,25 @@ db.serialize(() => {
       uses INTEGER DEFAULT 10,
       used INTEGER DEFAULT 0,
       created DATETIME DEFAULT CURRENT_TIMESTAMP,
-      version TEXT NOT NULL DEFAULT '1.0',
-      CREATE TABLE IF NOT EXISTS player_logs (
-    fc INTEGER PRIMARY KEY,
-    current_name TEXT NOT NULL,
-    previous_names TEXT DEFAULT '[]',  -- JSON array
-    change_history TEXT DEFAULT '[]',  -- JSON array of {old, new, timestamp}
-    is_blacklist BOOLEAN DEFAULT 0,
-    blacklist_name TEXT DEFAULT ''
+      version TEXT NOT NULL DEFAULT '1.0'
     )
-  `);
+  `, (err) => {
+    if (err) console.error("tokensテーブル作成失敗:", err);
+  });
+
+  // 2. player_logsテーブル
+  db.run(`
+    CREATE TABLE IF NOT EXISTS player_logs (
+      fc INTEGER PRIMARY KEY,
+      current_name TEXT NOT NULL,
+      previous_names TEXT DEFAULT '[]',
+      change_history TEXT DEFAULT '[]',
+      is_blacklist BOOLEAN DEFAULT 0,
+      blacklist_name TEXT DEFAULT ''
+    )
+  `, (err) => {
+    if (err) console.error("player_logsテーブル作成失敗:", err);
+  });
 });
 
 // === メモリキャッシュ（高速化）===

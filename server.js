@@ -119,7 +119,7 @@ app.get('/dashboard', async (req, res) => {
   }
   html += `</ul><hr>
     <form action="/add" method="POST">
-      Token: <input name="token" value="FREE-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly><br><br>
+      Token: <input name="token" value="MCO-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly><br><br>
       ユーザー: <input name="user" required><br><br>
       バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>  <!-- ここで好きなバージョンを入力可能 -->
       期限: <input name="expires" type="date" required><br><br>

@@ -2,6 +2,7 @@
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const https = require('https'); // スリープ防止（セルフピン）用に追加
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -121,7 +122,7 @@ app.get('/dashboard', async (req, res) => {
     <form action="/add" method="POST">
       Token: <input name="token" value="MCO-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly><br><br>
       ユーザー: <input name="user" required><br><br>
-      バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>  <!-- ここで好きなバージョンを入力可能 -->
+      バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>
       期限: <input name="expires" type="date" required><br><br>
       回数: <input name="uses" type="number" value="10" min="1" required><br><br>
       <button>発行</button>
@@ -161,7 +162,7 @@ app.get('/delete', async (req, res) => {
 // 6. API（公開）+ HEALTHチェック + バージョンチェック
 app.get('/api/check', async (req, res) => {
   const token = req.query.token;
-  const version = req.query.version;  // 新規: versionパラメータ
+  const version = req.query.version;
 
   // === スリープ対策：HEALTHチェック ===
   if (token === 'HEALTH') {
@@ -192,9 +193,27 @@ app.get('/api/check', async (req, res) => {
   res.json({ valid: true });
 });
 
+// === スリープ防止（セルフピン）機能 ===
+const SELF_PING_URL = 'https://hitsu-hack-server-bn9a.onrender.com/dashboard';
+const PING_INTERVAL_MS = 7 * 60 * 1000; // 7分 (420,000 ms)
+
+function startSelfPing() {
+  setInterval(() => {
+    https.get(SELF_PING_URL, (res) => {
+      console.log(`[Self-Ping] Ping sent to ${SELF_PING_URL} - Status: ${res.statusCode}`);
+      res.resume(); // メモリリーク回避のためレスポンスストリームを破棄
+    }).on('error', (err) => {
+      console.error(`[Self-Ping ERROR] Failed to ping ${SELF_PING_URL}:`, err.message);
+    });
+  }, PING_INTERVAL_MS);
+}
+
 // === サーバー起動 ===
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  console.log(`ログイン: https://token-milkchocoexe-ribon.onrender.com`);
+  console.log(`ログイン: https://hitsu-hack-server-bn9a.onrender.com`);
   console.log(`Cron Job設定推奨: curl -X GET /api/check?token=HEALTH`);
+  
+  // スリープ防止処理の開始
+  startSelfPing();
 });

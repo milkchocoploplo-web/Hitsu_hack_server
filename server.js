@@ -3,8 +3,40 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const https = require('https'); // スリープ防止（セルフピン）用に追加
+const crypto = require('crypto'); // ランダムトークン生成用に追加
 const app = express();
 const port = process.env.PORT || 3000;
+
+// === トークン生成関数（15〜20文字、大文字・小文字・数字を必ず含む） ===
+function generateToken() {
+  const charsLower = 'abcdefghijklmnopqrstuvwxyz';
+  const charsUpper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const charsNumbers = '0123456789';
+  const allChars = charsLower + charsUpper + charsNumbers;
+
+  // 15〜20文字のランダムな長さを決定
+  const length = Math.floor(Math.random() * (20 - 15 + 1)) + 15;
+
+  // 大文字、小文字、数字を最低1文字ずつ確保
+  const result = [
+    charsLower[crypto.randomInt(charsLower.length)],
+    charsUpper[crypto.randomInt(charsUpper.length)],
+    charsNumbers[crypto.randomInt(charsNumbers.length)]
+  ];
+
+  // 残りの文字数をランダムに埋める
+  for (let i = 3; i < length; i++) {
+    result.push(allChars[crypto.randomInt(allChars.length)]);
+  }
+
+  // 配列をシャッフルして並び順をランダムにする (Fisher-Yates Shuffle)
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+
+  return result.join('');
+}
 
 // === 環境変数（Render.comで設定）===
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
@@ -108,7 +140,7 @@ app.get('/', (req, res) => res.send(getLoginHTML()));
 // 2. ログイン処理
 app.post('/login', requireAuth, (req, res) => res.redirect('/dashboard'));
 
-// 3. 管理画面（バージョン入力追加）
+// 3. 管理画面（バージョン入力追加 + トークン自動生成変更）
 app.get('/dashboard', async (req, res) => {
   await updateCache();
   let html = `<h1>Token Manager</h1><ul>`;
@@ -120,7 +152,7 @@ app.get('/dashboard', async (req, res) => {
   }
   html += `</ul><hr>
     <form action="/add" method="POST">
-      Token: <input name="token" value="MCO-${Math.random().toString(36).substr(2,16).toUpperCase()}" readonly><br><br>
+      Token: <input name="token" value="${generateToken()}" readonly><br><br>
       ユーザー: <input name="user" required><br><br>
       バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>
       期限: <input name="expires" type="date" required><br><br>

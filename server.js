@@ -195,6 +195,7 @@ app.get('/dashboard', async (req, res) => {
   html += `</ul><hr>
     <form action="/add" method="POST">
       Token: <input name="token" value="${generateToken()}" readonly><br><br>
+      時間は＋9時間
       ユーザー: <input name="user" required><br><br>
       バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>
       期限: <input name="expires" type="date" required><br><br>

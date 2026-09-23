@@ -76,7 +76,7 @@ db.serialize(() => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       token TEXT NOT NULL,
       fc TEXT NOT NULL,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+     timestamp DATETIME DEFAULT (datetime('now', '+9 hours')) 
     )
   `);
 });
@@ -175,7 +175,7 @@ app.get('/dashboard', async (req, res) => {
   let html = `<h1>Token Manager</h1><ul>`;
   for (const [t, d] of Object.entries(tokenCache)) {
     const remaining = d.uses - d.used;
-    const expired = new Date(d.expires) < new Date();
+    const expired = new Date(d.expires + 'T23:59:59+09:00') < new Date();
     const mismatchCount = mismatchCounts[t] || 0;
     const mismatchBadge = mismatchCount > 0
       ? ` <span style="color:red; font-weight:bold;">⚠ 端末不一致 ${mismatchCount}件</span>`
@@ -366,18 +366,19 @@ app.get('/api/check', async (req, res) => {
   }
 
   const data = tokenCache[token];
-  if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
-    return res.json({ valid: false, msg: '無効なToken' });
-  }
+const expiresEnd = new Date(data.expires + 'T23:59:59+09:00');
+if (!data || expiresEnd < new Date() || data.used >= data.uses) {
+  return res.json({ valid: false, msg: '無効なToken' });
+}
   if (data.version !== version) {
     return res.json({ valid: false, msg: 'バージョンが一致しません' });
   }
 
   // 初回使用 → 端末情報を紐付け
   if (!data.device_id) {
-    db.run(
-      "UPDATE tokens SET device_id = ?, device_info = ?, first_used = CURRENT_TIMESTAMP WHERE token = ?",
-      [deviceId, deviceInfo || '', token],
+db.run(
+  "UPDATE tokens SET device_id = ?, device_info = ?, first_used = datetime('now', '+9 hours') WHERE token = ?",
+  [deviceId, deviceInfo || '', token],
       (err) => {
         if (err) console.error("初回端末登録失敗:", err);
         else console.log(`[Device Register] token=${token} device=${deviceId}`);
@@ -387,11 +388,10 @@ app.get('/api/check', async (req, res) => {
     data.device_info = deviceInfo || '';
     console.log(`[Device First Use] token=${token} device=${deviceId}`);
   } else if (data.device_id !== deviceId) {
-    // 不一致 → 記録 & 拒否
-    db.run(
-      "INSERT INTO device_mismatches (token, expected_device_id, actual_device_id, actual_device_info) VALUES (?, ?, ?, ?)",
-      [token, data.device_id, deviceId, deviceInfo || '']
-    );
+db.run(
+  "INSERT INTO device_mismatches (token, expected_device_id, actual_device_id, actual_device_info, timestamp) VALUES (?, ?, ?, ?, datetime('now', '+9 hours'))",
+  [token, data.device_id, deviceId, deviceInfo || '']
+);
     console.error(`[Device Mismatch] token=${token} expected=${data.device_id} actual=${deviceId}`);
     return res.json({ valid: false, msg: '⚠ 端末情報が一致しません。このトークンは別の端末で使用されています。' });
   }
@@ -422,7 +422,9 @@ app.get('/api/log-fc', (req, res) => {
     if (row && row.fc === String(fc)) {
       return res.json({ ok: true, skipped: true });
     }
-    db.run("INSERT INTO friend_codes (token, fc) VALUES (?, ?)", [token, String(fc)], (err2) => {
+    db.run(
+  "INSERT INTO friend_codes (token, fc, timestamp) VALUES (?, ?, datetime('now', '+9 hours'))",
+  [token, String(fc)],
       if (err2) return res.json({ ok: false });
       console.log(`[FC Log] token=${token} fc=${fc}`);
       res.json({ ok: true });

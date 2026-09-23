@@ -172,7 +172,7 @@ app.get('/dashboard', async (req, res) => {
     });
   });
 
-  let html = `<h1>Token Manager</h1><ul>`;
+  let html = `<h1>Token Manager(時間は＋9時間)</h1><ul>`;
   for (const [t, d] of Object.entries(tokenCache)) {
     const remaining = d.uses - d.used;
     const expired = new Date(d.expires) < new Date();
@@ -195,7 +195,6 @@ app.get('/dashboard', async (req, res) => {
   html += `</ul><hr>
     <form action="/add" method="POST">
       Token: <input name="token" value="${generateToken()}" readonly><br><br>
-      時間は＋9時間
       ユーザー: <input name="user" required><br><br>
       バージョン: <input name="version" value="1.0" required placeholder="例: 1.0 or legacy"><br><br>
       期限: <input name="expires" type="date" required><br><br>

@@ -1,62 +1,50 @@
-// server.js - 完全版（SQLite永続化 + スリープ対策 + HEALTHチェック + バージョンチェック）
+// server.js - 完全版（端末認証 + FCログ + SQLite永続化 + スリープ対策）
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const https = require('https'); // スリープ防止（セルフピン）用に追加
-const crypto = require('crypto'); // ランダムトークン生成用に追加
+const https = require('https');
+const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// === トークン生成関数（15〜20文字、大文字・小文字・数字を必ず含む） ===
+// === トークン生成 ===
 function generateToken() {
   const charsLower = 'abcdefghijklmnopqrstuvwxyz';
   const charsUpper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const charsNumbers = '0123456789';
   const allChars = charsLower + charsUpper + charsNumbers;
-
-  // 15〜20文字のランダムな長さを決定
   const length = Math.floor(Math.random() * (20 - 15 + 1)) + 15;
-
-  // 大文字、小文字、数字を最低1文字ずつ確保
   const result = [
     charsLower[crypto.randomInt(charsLower.length)],
     charsUpper[crypto.randomInt(charsUpper.length)],
     charsNumbers[crypto.randomInt(charsNumbers.length)]
   ];
-
-  // 残りの文字数をランダムに埋める
   for (let i = 3; i < length; i++) {
     result.push(allChars[crypto.randomInt(allChars.length)]);
   }
-
-  // 配列をシャッフルして並び順をランダムにする (Fisher-Yates Shuffle)
   for (let i = result.length - 1; i > 0; i--) {
     const j = crypto.randomInt(i + 1);
     [result[i], result[j]] = [result[j], result[i]];
   }
-
   return result.join('');
 }
 
-// === 環境変数（Render.comで設定）===
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 if (!ADMIN_PASSWORD) {
   console.error("ERROR: ADMIN_PASSWORDが未設定！Render.comで設定してください");
   process.exit(1);
 }
 
-// === Express設定 ===
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// === SQLite DB（永続化）===
+// === DB ===
 const dbPath = path.join(__dirname, 'tokens.db');
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) console.error("DB接続失敗:", err);
   else console.log(`DB接続: ${dbPath}`);
 });
 
-// テーブル作成（version列追加）
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS tokens (
@@ -67,15 +55,52 @@ db.serialize(() => {
       uses INTEGER DEFAULT 10,
       used INTEGER DEFAULT 0,
       created DATETIME DEFAULT CURRENT_TIMESTAMP,
-      version TEXT NOT NULL DEFAULT '1.0'
+      version TEXT NOT NULL DEFAULT '1.0',
+      device_id TEXT DEFAULT NULL,
+      device_info TEXT DEFAULT NULL,
+      first_used DATETIME DEFAULT NULL
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS device_mismatches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token TEXT NOT NULL,
+      expected_device_id TEXT,
+      actual_device_id TEXT,
+      actual_device_info TEXT,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS friend_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token TEXT NOT NULL,
+      fc TEXT NOT NULL,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
 });
 
-// === メモリキャッシュ（高速化）===
-let tokenCache = {};
+// 既存DBのマイグレーション（新カラム追加）
+db.all("PRAGMA table_info(tokens)", (err, rows) => {
+  if (err) return;
+  const cols = (rows || []).map(r => r.name);
+  if (!cols.includes('device_id')) {
+    db.run("ALTER TABLE tokens ADD COLUMN device_id TEXT DEFAULT NULL");
+    console.log("[Migration] device_id 列を追加");
+  }
+  if (!cols.includes('device_info')) {
+    db.run("ALTER TABLE tokens ADD COLUMN device_info TEXT DEFAULT NULL");
+    console.log("[Migration] device_info 列を追加");
+  }
+  if (!cols.includes('first_used')) {
+    db.run("ALTER TABLE tokens ADD COLUMN first_used DATETIME DEFAULT NULL");
+    console.log("[Migration] first_used 列を追加");
+  }
+});
 
-// キャッシュ更新関数
+// === キャッシュ ===
+let tokenCache = {};
 async function updateCache() {
   return new Promise((resolve) => {
     db.all("SELECT * FROM tokens", (err, rows) => {
@@ -90,12 +115,11 @@ async function updateCache() {
   });
 }
 
-// 起動時にキャッシュロード
 updateCache().then(() => {
   console.log(`キャッシュロード: ${Object.keys(tokenCache).length}トークン`);
 });
 
-// === ログイン画面HTML ===
+// === ログインHTML ===
 function getLoginHTML(error = '') {
   return `
 <!DOCTYPE html>
@@ -125,7 +149,6 @@ function getLoginHTML(error = '') {
 </html>`;
 }
 
-// === 認証ミドルウェア ===
 function requireAuth(req, res, next) {
   const password = req.body.password || req.query.password;
   if (password === ADMIN_PASSWORD) return next();
@@ -133,22 +156,41 @@ function requireAuth(req, res, next) {
 }
 
 // === ルート ===
-
-// 1. ログイン画面
 app.get('/', (req, res) => res.send(getLoginHTML()));
-
-// 2. ログイン処理
 app.post('/login', requireAuth, (req, res) => res.redirect('/dashboard'));
 
-// 3. 管理画面（バージョン入力追加 + トークン自動生成変更）
+// ダッシュボード
 app.get('/dashboard', async (req, res) => {
   await updateCache();
+
+  const mismatchCounts = await new Promise(r => {
+    db.all("SELECT token, COUNT(*) as cnt FROM device_mismatches GROUP BY token", (e, rows) => {
+      if (e) return r({});
+      const map = {};
+      rows.forEach(row => map[row.token] = row.cnt);
+      r(map);
+    });
+  });
+
   let html = `<h1>Token Manager</h1><ul>`;
   for (const [t, d] of Object.entries(tokenCache)) {
     const remaining = d.uses - d.used;
     const expired = new Date(d.expires) < new Date();
-    html += `<li><b>${t}</b> - ${d.user} - Ver: ${d.version} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} - ${d.expires} 
-      <a href="/delete?token=${t}" style="color:red;" onclick="return confirm('無効化？');">[無効化]</a></li>`;
+    const mismatchCount = mismatchCounts[t] || 0;
+    const mismatchBadge = mismatchCount > 0
+      ? ` <span style="color:red; font-weight:bold;">⚠ 端末不一致 ${mismatchCount}件</span>`
+      : '';
+    const deviceStatus = d.device_id
+      ? `<span style="color:#28a745;">[端末登録済]</span>`
+      : `<span style="color:#ff9800;">[未使用]</span>`;
+
+    html += `<li style="margin:10px 0; padding:6px; background:#fafafa; border-radius:6px;">
+      <b>${t}</b> - ${d.user} - Ver: ${d.version} - ${expired ? '期限切れ' : '残り: ' + remaining + '回'} - ${d.expires}
+      ${deviceStatus}${mismatchBadge}<br>
+      <a href="/delete?token=${t}" style="color:red;" onclick="return confirm('無効化？');">[無効化]</a>
+      <a href="javascript:void(0)" onclick="showDeviceInfo('${t}')" style="color:#007bff; margin-left:8px;">[端末情報を表示]</a>
+      <a href="javascript:void(0)" onclick="showFriendCodes('${t}')" style="color:#007bff; margin-left:8px;">[フレンドコードをみる]</a>
+    </li>`;
   }
   html += `</ul><hr>
     <form action="/add" method="POST">
@@ -159,17 +201,42 @@ app.get('/dashboard', async (req, res) => {
       回数: <input name="uses" type="number" value="10" min="1" required><br><br>
       <button>発行</button>
     </form>
-    <p><a href="/">ログアウト</a></p>`;
+    <p><a href="/">ログアウト</a></p>
+
+    <div id="modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.55); z-index:1000;">
+      <div style="background:white; margin:40px auto; padding:22px; max-width:920px; max-height:82vh; overflow-y:auto; border-radius:10px; position:relative; box-shadow:0 8px 32px rgba(0,0,0,0.3);">
+        <button onclick="document.getElementById('modal').style.display='none'" style="position:absolute; top:10px; right:10px; padding:6px 12px; cursor:pointer; background:#666; color:white; border:none; border-radius:5px;">閉じる</button>
+        <div id="modal-content" style="margin-top:16px;"></div>
+      </div>
+    </div>
+
+    <script>
+    function showDeviceInfo(token) {
+      fetch('/api/device-info?token=' + encodeURIComponent(token))
+        .then(r => r.text())
+        .then(html => {
+          document.getElementById('modal-content').innerHTML = html;
+          document.getElementById('modal').style.display = 'block';
+        });
+    }
+    function showFriendCodes(token) {
+      fetch('/api/friend-codes?token=' + encodeURIComponent(token))
+        .then(r => r.text())
+        .then(html => {
+          document.getElementById('modal-content').innerHTML = html;
+          document.getElementById('modal').style.display = 'block';
+        });
+    }
+    </script>`;
   res.send(html);
 });
 
-// 4. トークン発行（version追加）
+// 発行
 app.post('/add', (req, res) => {
   const { token, user, version, expires, uses } = req.body;
   if (!token || !user || !version || !expires || !uses) return res.send('入力漏れ');
-
   db.run(
-    "INSERT OR REPLACE INTO tokens (token, user, version, expires, uses, used) VALUES (?, ?, ?, ?, ?, 0)",
+    "INSERT OR REPLACE INTO tokens (token, user, version, expires, uses, used, device_id, device_info, first_used) VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, NULL)",
     [token, user, version, expires, parseInt(uses)],
     async (err) => {
       if (err) return res.send('発行失敗: ' + err.message);
@@ -179,11 +246,10 @@ app.post('/add', (req, res) => {
   );
 });
 
-// 5. 無効化
+// 無効化
 app.get('/delete', async (req, res) => {
   const token = req.query.token;
   if (!token) return res.redirect('/dashboard');
-
   db.run("DELETE FROM tokens WHERE token = ?", [token], async (err) => {
     if (err) console.error("削除失敗:", err);
     await updateCache();
@@ -191,30 +257,143 @@ app.get('/delete', async (req, res) => {
   });
 });
 
-// 6. API（公開）+ HEALTHチェック + バージョンチェック
+// === API: 端末情報 ===
+app.get('/api/device-info', async (req, res) => {
+  const token = req.query.token;
+  const data = tokenCache[token];
+  if (!data) return res.send('<p>トークンが見つかりません</p>');
+
+  let html = `<h2>端末情報</h2><p><b>Token:</b> <code>${token}</code></p>`;
+
+  if (!data.device_id) {
+    html += `<p style="color:#ff9800; font-weight:bold;">このトークンはまだ使用されていません</p>`;
+  } else {
+    let info = {};
+    try { info = JSON.parse(data.device_info || '{}'); } catch (e) {}
+
+    html += `<p><b>登録端末ID:</b> <code style="background:#eef; padding:2px 6px;">${data.device_id}</code></p>`;
+    html += `<p><b>初回使用日時:</b> ${data.first_used || '不明'}</p>`;
+    html += `<table border="1" cellpadding="8" style="border-collapse:collapse; margin-top:10px;">
+      <tr><th style="background:#f0f0f0; text-align:left;">ホスト名</th><td>${escapeHtml(info.hostname || '-')}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">プラットフォーム</th><td>${escapeHtml(info.platform || '-')}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">アーキテクチャ</th><td>${escapeHtml(info.arch || '-')}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">OSバージョン</th><td>${escapeHtml(info.release || '-')}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">CPU</th><td>${escapeHtml(info.cpu || '-')}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">コア数</th><td>${escapeHtml(String(info.cores || '-'))}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">MACアドレス</th><td>${escapeHtml(info.mac || '-')}</td></tr>
+      <tr><th style="background:#f0f0f0; text-align:left;">メモリ</th><td>${escapeHtml(info.totalmem || '-')}</td></tr>
+    </table>`;
+  }
+
+  // 不一致履歴
+  const mismatches = await new Promise(r => {
+    db.all("SELECT * FROM device_mismatches WHERE token = ? ORDER BY id DESC", [token], (e, rows) => r(rows || []));
+  });
+
+  if (mismatches.length > 0) {
+    html += `<h3 style="color:red; margin-top:22px;">⚠ 端末情報不一致ログ (${mismatches.length}件)</h3>`;
+    html += `<table border="1" cellpadding="8" style="border-collapse:collapse; font-size:13px; width:100%;">
+      <tr style="background:#ffdddd;">
+        <th>日時</th>
+        <th>正規端末ID</th>
+        <th>不正端末ID</th>
+        <th>不正端末情報</th>
+      </tr>`;
+    mismatches.forEach(m => {
+      let info = {};
+      try { info = JSON.parse(m.actual_device_info || '{}'); } catch (e) {}
+      const infoStr = Object.entries(info).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(String(v))}`).join('<br>');
+      html += `<tr style="background:#ffeeee;">
+        <td>${escapeHtml(m.timestamp || '')}</td>
+        <td><code style="font-size:11px;">${escapeHtml(m.expected_device_id || '-')}</code></td>
+        <td><code style="font-size:11px; color:red; font-weight:bold;">${escapeHtml(m.actual_device_id || '-')}</code></td>
+        <td style="color:red; font-size:11px;">${infoStr || '-'}</td>
+      </tr>`;
+    });
+    html += `</table>`;
+  } else {
+    html += `<p style="color:#28a745; margin-top:18px; font-weight:bold;">✓ 不正アクセスは検出されていません</p>`;
+  }
+
+  res.send(html);
+});
+
+// === API: フレンドコードログ ===
+app.get('/api/friend-codes', async (req, res) => {
+  const token = req.query.token;
+  const data = tokenCache[token];
+  if (!data) return res.send('<p>トークンが見つかりません</p>');
+
+  const logs = await new Promise(r => {
+    db.all("SELECT * FROM friend_codes WHERE token = ? ORDER BY id DESC LIMIT 200", [token], (e, rows) => r(rows || []));
+  });
+
+  let html = `<h2>フレンドコード使用履歴</h2><p><b>Token:</b> <code>${token}</code></p>`;
+
+  if (logs.length === 0) {
+    html += `<p>まだフレンドコードの使用履歴がありません</p>`;
+  } else {
+    html += `<table border="1" cellpadding="8" style="border-collapse:collapse; width:100%;">
+      <tr style="background:#f0f0f0;"><th>#</th><th>フレンドコード</th><th>日時</th></tr>`;
+    logs.forEach((log, idx) => {
+      html += `<tr>
+        <td>${logs.length - idx}</td>
+        <td><code style="font-size:14px; font-weight:bold; color:#007bff;">${escapeHtml(log.fc)}</code></td>
+        <td>${escapeHtml(log.timestamp || '')}</td>
+      </tr>`;
+    });
+    html += `</table>`;
+  }
+
+  res.send(html);
+});
+
+// === API: トークンチェック（端末認証付き） ===
 app.get('/api/check', async (req, res) => {
   const token = req.query.token;
   const version = req.query.version;
+  const deviceId = req.query.device_id;
+  const deviceInfo = req.query.device_info;
 
-  // === スリープ対策：HEALTHチェック ===
   if (token === 'HEALTH') {
     return res.json({ valid: false, msg: 'Server is alive' });
   }
-
-  // === バージョンチェック（必須） ===
   if (!version) {
     return res.json({ valid: false, msg: 'バージョン指定が必要です（古いEXE？）' });
   }
+  if (!deviceId) {
+    return res.json({ valid: false, msg: '端末情報を取得できませんでした' });
+  }
 
-  // === 通常認証 ===
   const data = tokenCache[token];
   if (!data || new Date(data.expires) < new Date() || data.used >= data.uses) {
     return res.json({ valid: false, msg: '無効なToken' });
   }
-
-  // === バージョン一致チェック ===
   if (data.version !== version) {
     return res.json({ valid: false, msg: 'バージョンが一致しません' });
+  }
+
+  // 初回使用 → 端末情報を紐付け
+  if (!data.device_id) {
+    db.run(
+      "UPDATE tokens SET device_id = ?, device_info = ?, first_used = CURRENT_TIMESTAMP WHERE token = ?",
+      [deviceId, deviceInfo || '', token],
+      (err) => {
+        if (err) console.error("初回端末登録失敗:", err);
+        else console.log(`[Device Register] token=${token} device=${deviceId}`);
+      }
+    );
+    data.device_id = deviceId;
+    data.device_info = deviceInfo || '';
+    console.log(`[Device First Use] token=${token} device=${deviceId}`);
+  } else if (data.device_id !== deviceId) {
+    // 不一致 → 記録 & 拒否
+    db.run(
+      "INSERT INTO device_mismatches (token, expected_device_id, actual_device_id, actual_device_info) VALUES (?, ?, ?, ?)",
+      [token, data.device_id, deviceId, deviceInfo || '']
+    );
+    console.error(`[Device Mismatch] token=${token} expected=${data.device_id} actual=${deviceId}`);
+    return res.json({ valid: false, msg: '⚠ 端末情報が一致しません。このトークンは別の端末で使用されています。' });
   }
 
   data.used++;
@@ -225,27 +404,59 @@ app.get('/api/check', async (req, res) => {
   res.json({ valid: true });
 });
 
-// === スリープ防止（セルフピン）機能 ===
+// === API: FCログ（同じFCならスキップ） ===
+app.get('/api/log-fc', (req, res) => {
+  const { token, fc, device } = req.query;
+  if (!token || !fc) return res.json({ ok: false });
+
+  const data = tokenCache[token];
+  if (!data) return res.json({ ok: false });
+  if (data.device_id && device && data.device_id !== device) {
+    console.warn(`[FC Log] 端末不一致 token=${token}`);
+    return res.json({ ok: false, msg: '端末不一致' });
+  }
+
+  // 最新と同じFCならスキップ
+  db.get("SELECT fc FROM friend_codes WHERE token = ? ORDER BY id DESC LIMIT 1", [token], (err, row) => {
+    if (err) return res.json({ ok: false });
+    if (row && row.fc === String(fc)) {
+      return res.json({ ok: true, skipped: true });
+    }
+    db.run("INSERT INTO friend_codes (token, fc) VALUES (?, ?)", [token, String(fc)], (err2) => {
+      if (err2) return res.json({ ok: false });
+      console.log(`[FC Log] token=${token} fc=${fc}`);
+      res.json({ ok: true });
+    });
+  });
+});
+
+// === HTMLエスケープ ===
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// === スリープ防止 ===
 const SELF_PING_URL = 'https://hitsu-hack-server-bn9a.onrender.com/dashboard';
-const PING_INTERVAL_MS = 7 * 60 * 1000; // 7分 (420,000 ms)
+const PING_INTERVAL_MS = 7 * 60 * 1000;
 
 function startSelfPing() {
   setInterval(() => {
     https.get(SELF_PING_URL, (res) => {
-      console.log(`[Self-Ping] Ping sent to ${SELF_PING_URL} - Status: ${res.statusCode}`);
-      res.resume(); // メモリリーク回避のためレスポンスストリームを破棄
+      console.log(`[Self-Ping] Status: ${res.statusCode}`);
+      res.resume();
     }).on('error', (err) => {
-      console.error(`[Self-Ping ERROR] Failed to ping ${SELF_PING_URL}:`, err.message);
+      console.error(`[Self-Ping ERROR]:`, err.message);
     });
   }, PING_INTERVAL_MS);
 }
 
-// === サーバー起動 ===
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`ログイン: https://hitsu-hack-server-bn9a.onrender.com`);
-  console.log(`Cron Job設定推奨: curl -X GET /api/check?token=HEALTH`);
-  
-  // スリープ防止処理の開始
   startSelfPing();
 });

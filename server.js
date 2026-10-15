@@ -81,7 +81,7 @@ db.serialize(() => {
   `);
 });
 
-// 既存DBのマイグレーション（新カラム追加）
+// 既存のマイグレーション部分に追加
 db.all("PRAGMA table_info(tokens)", (err, rows) => {
   if (err) return;
   const cols = (rows || []).map(r => r.name);
@@ -97,6 +97,12 @@ db.all("PRAGMA table_info(tokens)", (err, rows) => {
     db.run("ALTER TABLE tokens ADD COLUMN first_used DATETIME DEFAULT NULL");
     console.log("[Migration] first_used 列を追加");
   }
+  // ▼▼▼ ここを追加 ▼▼▼
+  if (!cols.includes('order_id')) {
+    db.run("ALTER TABLE tokens ADD COLUMN order_id TEXT DEFAULT NULL");
+    console.log("[Migration] order_id 列を追加");
+  }
+  // ▲▲▲ ここを追加 ▲▲▲
 });
 
 // === キャッシュ ===
@@ -432,26 +438,54 @@ app.get('/api/log-fc', (req, res) => {
 // ============================================================
 // 【追加】管理API: 外部（販売サイト）からのトークン発行
 // ============================================================
+// ============================================================
+// 管理API: 外部（販売サイト）からのトークン発行
+// - 同じ orderId で複数回呼ばれても、トークンは1つしか発行しない
+// ============================================================
 app.post('/api/admin/issue', (req, res) => {
   const adminPassword = req.headers['x-admin-password'];
   if (adminPassword !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { user, version, uses, expires } = req.body;
-  const token = generateToken();
+  const { user, version, uses, expires, orderId } = req.body;
 
+  // orderId が指定されている場合、既存のトークンがないか確認
+  if (orderId) {
+    db.get("SELECT token FROM tokens WHERE order_id = ?", [orderId], (err, row) => {
+      if (err) {
+        console.error("order_id検索失敗:", err);
+        return res.status(500).json({ error: err.message });
+      }
+      if (row) {
+        // 既存トークンがあれば、それを返す（新規発行しない）
+        console.log(`[Admin Issue] 既存トークンを返却 orderId=${orderId} token=${row.token}`);
+        return res.json({ success: true, token: row.token, reused: true });
+      }
+
+      // 新規発行
+      issueNewToken(user, version, uses, expires, orderId, res);
+    });
+  } else {
+    // orderId がない場合は従来通り新規発行
+    issueNewToken(user, version, uses, expires, null, res);
+  }
+});
+
+// 新規トークン発行の共通処理
+function issueNewToken(user, version, uses, expires, orderId, res) {
+  const token = generateToken();
   db.run(
-    "INSERT INTO tokens (token, user, version, expires, uses, used) VALUES (?, ?, ?, ?, ?, 0)",
-    [token, user || 'customer', version || '1.0', expires, uses || 10],
+    "INSERT INTO tokens (token, user, version, expires, uses, used, order_id) VALUES (?, ?, ?, ?, ?, 0, ?)",
+    [token, user || 'customer', version || '3.0', expires, uses || 10, orderId],
     async (err) => {
       if (err) return res.status(500).json({ error: err.message });
       await updateCache();
-      console.log(`[Admin Issue] token=${token} user=${user}`);
-      res.json({ success: true, token });
+      console.log(`[Admin Issue] 新規発行 token=${token} orderId=${orderId}`);
+      res.json({ success: true, token, reused: false });
     }
   );
-});
+}
 // === HTMLエスケープ ===
 function escapeHtml(s) {
   return String(s)

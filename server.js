@@ -429,7 +429,29 @@ app.get('/api/log-fc', (req, res) => {
     });
   });
 });
+// ============================================================
+// 【追加】管理API: 外部（販売サイト）からのトークン発行
+// ============================================================
+app.post('/api/admin/issue', (req, res) => {
+  const adminPassword = req.headers['x-admin-password'];
+  if (adminPassword !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
+  const { user, version, uses, expires } = req.body;
+  const token = generateToken();
+
+  db.run(
+    "INSERT INTO tokens (token, user, version, expires, uses, used) VALUES (?, ?, ?, ?, ?, 0)",
+    [token, user || 'customer', version || '1.0', expires, uses || 10],
+    async (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      await updateCache();
+      console.log(`[Admin Issue] token=${token} user=${user}`);
+      res.json({ success: true, token });
+    }
+  );
+});
 // === HTMLエスケープ ===
 function escapeHtml(s) {
   return String(s)
